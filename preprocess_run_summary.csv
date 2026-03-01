@@ -1,7 +1,0 @@
-﻿yontem,deneme_no,train_csv,test_csv,train_samples_final,test_samples_final,feature_count
-03_CV_Rolling,1,C:\Users\erenf\bitirme-2\03_CV_Rolling\Deneme_01\egitim.csv,C:\Users\erenf\bitirme-2\03_CV_Rolling\Deneme_01\test.csv,4018,1991,23
-03_CV_Rolling,2,C:\Users\erenf\bitirme-2\03_CV_Rolling\Deneme_02\egitim.csv,C:\Users\erenf\bitirme-2\03_CV_Rolling\Deneme_02\test.csv,3994,1991,23
-03_CV_Rolling,3,C:\Users\erenf\bitirme-2\03_CV_Rolling\Deneme_03\egitim.csv,C:\Users\erenf\bitirme-2\03_CV_Rolling\Deneme_03\test.csv,3994,2015,23
-04_CV_Expanding,1,C:\Users\erenf\bitirme-2\04_CV_Expanding\Deneme_01\egitim.csv,C:\Users\erenf\bitirme-2\04_CV_Expanding\Deneme_01\test.csv,4018,1991,23
-04_CV_Expanding,2,C:\Users\erenf\bitirme-2\04_CV_Expanding\Deneme_02\egitim.csv,C:\Users\erenf\bitirme-2\04_CV_Expanding\Deneme_02\test.csv,6021,1991,23
-04_CV_Expanding,3,C:\Users\erenf\bitirme-2\04_CV_Expanding\Deneme_03\egitim.csv,C:\Users\erenf\bitirme-2\04_CV_Expanding\Deneme_03\test.csv,8024,2015,23
