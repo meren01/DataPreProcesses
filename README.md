@@ -1,3 +1,5 @@
+### Tech Stack (Icons)
+![Tech Stack](https://skillicons.dev/icons?i=python,git,github,vscode)
 # DataPreProcesses (Bitirme-2) — Winter (DJF) Data Pipeline
 
 A compact Python data-preprocessing pipeline for **winter-only (DJF: Dec–Jan–Feb)** wind-speed forecasting experiments.  
