@@ -1,20 +1,8 @@
-# preprocces.py
 from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-
-# ============================================================
-# PREPROCESS (PIPELINE UYUMLU, ROLLING + EXPANDING)
-# - 3. scriptin ürettiği fold'lardaki egitim/test csv'leri okur
-# - DateTime_LST + WS50M ile çalışır (yoksa otomatik adaylardan seçer)
-# - Saatliğe oturtur, kısa boşlukları interpolate eder (limitli)
-# - Lag + rolling + hour_sin/cos feature üretir (leakage'siz)
-# - Hedef: t+1
-# - MinMaxScaler SADECE train’de fit (leakage yok)
-# - Çıktı: Deneme_XX/hazir_veri/...
-# ============================================================
 
 # =========================
 # AYARLAR
@@ -22,49 +10,98 @@ from sklearn.preprocessing import MinMaxScaler
 PREFERRED_TIME_COL = "DateTime_LST"
 PREFERRED_TARGET_COL = "WS50M"
 
-FREQ = "H"        # saatlik
-HORIZON = 1       # t+1
+FREQ = "H"
+HORIZON = 1
 
 LAGS = [1, 2, 3, 6, 12, 24, 48, 72, 168]
 ROLL_WINDOWS = [3, 6, 12, 24, 48, 168]
-ADD_TIME_CYCLES = True  # hour_sin/cos
+ADD_TIME_CYCLES = True
 
 INTERP_LIMIT_HOURS = 6
-FILL_LONG_GAPS_WITH = None  # None: uzun boşluklar NaN kalır (en güvenlisi)
+FILL_LONG_GAPS_WITH = None
 
-# fold_listesi kolonları (senin 3. scriptin üretiyor)
 FOLD_TRAIN_COL = "EgitimDosyasi"
-FOLD_TEST_COL  = "TestDosyasi"
+FOLD_TEST_COL = "TestDosyasi"
 
 
 # =========================
-# YARDIMCILAR
+# DOSYA BULMA (ARGÜMANSIZ)
 # =========================
-def find_project_root() -> Path:
+def find_candidate_roots() -> list[Path]:
     """
-    En güvenlisi: scriptin olduğu klasörü proje kökü kabul et.
-    (Senin durumda: C:\\Users\\erenf\\bitirme-2)
+    Kullanıcının farklı klasör düzenlerini yakalamak için birkaç aday kök üretir.
     """
-    return Path(__file__).resolve().parent
+    here = Path(__file__).resolve().parent
+    home = Path.home()
 
-
-def find_fold_lists(project_root: Path) -> list[Path]:
-    """
-    Hem Rolling hem Expanding fold_listesi.csv bulur.
-    """
-    candidates = [
-        project_root / "03_CV_Rolling" / "fold_listesi.csv",
-        project_root / "04_CV_Expanding" / "fold_listesi.csv",
+    roots = [
+        here,
+        home / "bitirme-2",
+        home / "Desktop" / "bitirme-2",
+        home / "Masaüstü" / "bitirme-2",
+        home / "Masaustu" / "bitirme-2",
     ]
-    found = [p for p in candidates if p.exists()]
+
+    # mevcut olanları tut
+    roots = [r for r in roots if r.exists()]
+    # tekrarları kaldır
+    uniq = []
+    for r in roots:
+        if r not in uniq:
+            uniq.append(r)
+    return uniq
+
+
+def find_fold_lists_auto() -> list[Path]:
+    """
+    Rolling ve Expanding fold_listesi.csv dosyalarını otomatik bulur.
+    - Klasik yollar:
+      root/03_CV_Rolling/fold_listesi.csv
+      root/04_CV_Expanding/fold_listesi.csv
+    - Ayrıca tüm alt klasörlerde 'fold_listesi.csv' arar.
+    """
+    roots = find_candidate_roots()
+    found = []
+
+    # 1) Klasik yerler
+    for root in roots:
+        for p in [
+            root / "03_CV_Rolling" / "fold_listesi.csv",
+            root / "04_CV_Expanding" / "fold_listesi.csv",
+        ]:
+            if p.exists() and p not in found:
+                found.append(p)
+
+    # 2) Derin arama (her ihtimale karşı)
+    for root in roots:
+        for p in root.rglob("fold_listesi.csv"):
+            # çok alakasız yerlere gitmesin diye en azından rolling/expanding içeriyorsa ekle
+            s = str(p).lower()
+            if ("03_cv_rolling" in s) or ("04_cv_expanding" in s):
+                if p not in found:
+                    found.append(p)
+
     if not found:
         raise FileNotFoundError(
-            "fold_listesi.csv bulunamadı. Beklenen yollar:\n"
-            f"- {candidates[0]}\n- {candidates[1]}"
+            "fold_listesi.csv otomatik bulunamadı.\n"
+            "Çözüm: fold_listesi.csv'leri 03_CV_Rolling ve 04_CV_Expanding altında tuttuğundan emin ol."
         )
+
+    # Stabil sıra: Rolling önce, Expanding sonra
+    found = sorted(found, key=lambda x: ("04_cv_expanding" in str(x).lower(), str(x)))
     return found
 
 
+def resolve_path(base_dir: Path, p: str) -> Path:
+    pp = Path(str(p).strip())
+    if pp.is_absolute():
+        return pp
+    return (base_dir / pp).resolve()
+
+
+# =========================
+# PREPROCESS HELPERS
+# =========================
 def pick_column(df: pd.DataFrame, preferred: str, candidates: list[str], purpose: str) -> str:
     if preferred in df.columns:
         return preferred
@@ -75,12 +112,6 @@ def pick_column(df: pd.DataFrame, preferred: str, candidates: list[str], purpose
 
 
 def ensure_datetime_sorted(df: pd.DataFrame, time_col: str, target_col: str) -> pd.DataFrame:
-    """
-    - time parse
-    - target numeric
-    - duplicate timestamp -> mean ile tekilleştir
-    - time'a göre sırala
-    """
     df = df.copy()
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
     df = df.dropna(subset=[time_col]).copy()
@@ -94,9 +125,6 @@ def ensure_datetime_sorted(df: pd.DataFrame, time_col: str, target_col: str) -> 
 
 
 def hourly_reindex(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
-    """
-    Eksik saatleri satır olarak ekler (target NaN).
-    """
     df = df.copy().set_index(time_col)
     full_idx = pd.date_range(df.index.min(), df.index.max(), freq=FREQ)
     df = df.reindex(full_idx)
@@ -105,10 +133,6 @@ def hourly_reindex(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
 
 
 def limited_time_interpolate(df: pd.DataFrame, time_col: str, target_col: str) -> pd.DataFrame:
-    """
-    Sadece kısa boşlukları doldurur (limit=INTERP_LIMIT_HOURS).
-    Uzun boşluklar NaN kalır (None seçeneği en güvenlisi).
-    """
     df = df.copy()
     df[time_col] = pd.to_datetime(df[time_col])
     s = df.set_index(time_col)[target_col]
@@ -118,15 +142,12 @@ def limited_time_interpolate(df: pd.DataFrame, time_col: str, target_col: str) -
         limit=INTERP_LIMIT_HOURS,
         limit_direction="both",
     )
-
     df[target_col] = s2.values
 
     if FILL_LONG_GAPS_WITH == "ffill":
         df[target_col] = df[target_col].ffill()
     elif isinstance(FILL_LONG_GAPS_WITH, (int, float)):
         df[target_col] = df[target_col].fillna(float(FILL_LONG_GAPS_WITH))
-    # None: uzun boşluklar NaN kalır
-
     return df
 
 
@@ -143,12 +164,6 @@ def add_time_features(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
 
 
 def build_features(df: pd.DataFrame, time_col: str, target_col: str) -> pd.DataFrame:
-    """
-    Leakage'siz:
-    - Lag: s.shift(k)
-    - Rolling: s.shift(1).rolling(...)
-    - Target: y = s.shift(-HORIZON)  (t+1)
-    """
     df = df.copy()
     s = df[target_col]
 
@@ -166,12 +181,6 @@ def build_features(df: pd.DataFrame, time_col: str, target_col: str) -> pd.DataF
 
 
 def split_Xy(df_feat: pd.DataFrame, time_col: str):
-    """
-    Sadece engineered feature'ları alır:
-    - lag_*
-    - roll_mean_*, roll_std_*
-    - hour_sin/hour_cos (veya hour)
-    """
     y_col = "y_t_plus_1"
 
     engineered = []
@@ -182,7 +191,6 @@ def split_Xy(df_feat: pd.DataFrame, time_col: str):
 
     feature_cols = [c for c in engineered if c in df_feat.columns]
 
-    # NaN drop: feature veya y NaN ise çıkar
     valid = df_feat[feature_cols + [y_col]].notna().all(axis=1)
     clean = df_feat.loc[valid, [time_col] + feature_cols + [y_col]].reset_index(drop=True)
 
@@ -193,12 +201,9 @@ def split_Xy(df_feat: pd.DataFrame, time_col: str):
 
 
 def scale_fit_train_transform_test(X_train: pd.DataFrame, X_test: pd.DataFrame):
-    """
-    Leakage yok: scaler sadece train'e fit.
-    """
     scaler = MinMaxScaler()
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns)
-    X_test_s  = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
+    X_test_s = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
     return X_train_s, X_test_s
 
 
@@ -220,16 +225,18 @@ def write_outputs(out_dir: Path, X_train, y_train, X_test, y_test, feature_cols,
 # MAIN
 # =========================
 def main():
-    project_root = find_project_root()
-    fold_paths = find_fold_lists(project_root)
-
-    print(f"📌 Proje kökü: {project_root}")
-    print("📌 Bulunan fold listeleri:")
+    fold_paths = find_fold_lists_auto()
+    print("✅ Bulunan fold_listesi.csv dosyaları:")
     for p in fold_paths:
-        print("   -", p)
+        print("  -", p)
+
+    summary_rows = []
 
     for fold_path in fold_paths:
-        fold_df = pd.read_csv(fold_path, encoding="utf-8-sig")
+        fold_dir = fold_path.parent
+
+        # ✅ delimiter otomatik (',' veya ';')
+        fold_df = pd.read_csv(fold_path, encoding="utf-8-sig", sep=None, engine="python")
 
         if FOLD_TRAIN_COL not in fold_df.columns or FOLD_TEST_COL not in fold_df.columns:
             raise ValueError(
@@ -237,25 +244,22 @@ def main():
                 f"Kolonlar: {list(fold_df.columns)}"
             )
 
-        print(f"\n✅ İşleniyor: {fold_path}")
-        print(f"   Deneme sayısı: {len(fold_df)}")
+        print(f"\n🔧 İşleniyor: {fold_path}  | Deneme sayısı={len(fold_df)}")
 
         for i, row in fold_df.iterrows():
-            train_path = Path(row[FOLD_TRAIN_COL])
-            test_path  = Path(row[FOLD_TEST_COL])
+            train_path = resolve_path(fold_dir, row[FOLD_TRAIN_COL])
+            test_path  = resolve_path(fold_dir, row[FOLD_TEST_COL])
 
             deneme_dir = train_path.parent
             out_dir = deneme_dir / "hazir_veri"
 
-            # 1) Okuma
             train_df0 = pd.read_csv(train_path, encoding="utf-8-sig")
             test_df0  = pd.read_csv(test_path,  encoding="utf-8-sig")
 
-            # 2) Kolon seçimi
             time_col = pick_column(
                 train_df0,
                 preferred=PREFERRED_TIME_COL,
-                candidates=["DateTime_LST", "DateTime", "datetime", "timestamp", "DateTime_LST"],
+                candidates=["DateTime_LST", "DateTime", "datetime", "timestamp"],
                 purpose="Tarih/Time"
             )
             target_col = pick_column(
@@ -265,27 +269,21 @@ def main():
                 purpose="Hedef/Target"
             )
 
-            # 3) Sırala + duplicate düzelt (train/test ayrı)
             train_raw = ensure_datetime_sorted(train_df0, time_col, target_col)
             test_raw  = ensure_datetime_sorted(test_df0,  time_col, target_col)
 
-            # 4) Saatliğe oturt
             train_hr = hourly_reindex(train_raw, time_col)
             test_hr  = hourly_reindex(test_raw,  time_col)
 
-            # 5) İmpute (train/test ayrı)
             train_imp = limited_time_interpolate(train_hr, time_col, target_col)
             test_imp  = limited_time_interpolate(test_hr,  time_col, target_col)
 
-            # 6) Feature üret
             train_feat = build_features(train_imp, time_col, target_col)
             test_feat  = build_features(test_imp,  time_col, target_col)
 
-            # 7) X/y ayır
             X_train, y_train, _, feat_cols = split_Xy(train_feat, time_col)
             X_test,  y_test,  _, _        = split_Xy(test_feat,  time_col)
 
-            # 8) Normalize (fit only train)
             X_train_s, X_test_s = scale_fit_train_transform_test(X_train, X_test)
 
             summary = {
@@ -328,13 +326,24 @@ def main():
             }
 
             write_outputs(out_dir, X_train_s, y_train, X_test_s, y_test, feat_cols, summary)
-            print(f"✔ {fold_path.parent.name} | Deneme {i+1}/{len(fold_df)} hazır -> {out_dir}")
+            print(f"✔ {fold_dir.name} | Deneme {i+1}/{len(fold_df)} -> {out_dir}")
 
-    print("\n✅ Bitti. Model scriptlerin şunları okuyacak:")
-    print("   - hazir_veri/egitim_featurelari.csv")
-    print("   - hazir_veri/egitim_hedefi_t_plus_1.csv")
-    print("   - hazir_veri/test_featurelari.csv")
-    print("   - hazir_veri/test_hedefi_t_plus_1.csv")
+            # Toplu özet CSV için satır
+            summary_rows.append({
+                "yontem": fold_dir.name,
+                "deneme_no": int(i + 1),
+                "train_csv": str(train_path),
+                "test_csv": str(test_path),
+                "train_samples_final": int(len(X_train_s)),
+                "test_samples_final": int(len(X_test_s)),
+                "feature_count": int(len(feat_cols))
+            })
+
+    # En sona tek özet CSV yaz (scriptin bulunduğu klasöre)
+    out_summary = Path(__file__).resolve().parent / "preprocess_run_summary.csv"
+    pd.DataFrame(summary_rows).to_csv(out_summary, index=False, encoding="utf-8-sig")
+    print(f"\n✅ Toplu özet yazıldı: {out_summary}")
+    print("✅ Bitti. Model scriptlerin her denemede hazir_veri/ içini okuyacak.")
 
 
 if __name__ == "__main__":
