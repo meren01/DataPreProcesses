@@ -3,21 +3,19 @@ import shutil
 import pandas as pd
 
 # =========================
-# AYARLAR (Dokunma)
+# AYARLAR (YENİ YAPI - DOKUNMA)
 # =========================
 KOK_KLASOR = "bitirme-2"
 
-# Girdi dosyası alternatifleri (otomatik bulur)
-# 1) Desktop/bitirme-2/1_KisVerisi/kis_verisi_tumu.csv
-# 2) Desktop/bitirme-2/kis_aylari_butun.csv
+# SADECE yeni 2. script çıktısı
 ADAY_GIRDI_YOLLARI = [
-    ("1_KisVerisi", "kis_verisi_tumu.csv"),
     ("", "kis_aylari_butun.csv"),
     ("", "kis_aylari_butun.csv".replace("butun", "bütün")),
 ]
 
-TARIH = "DateTime"
-HEDEF = "Speed"
+# Yeni dataset kolonları
+TARIH = "DateTime_LST"
+HEDEF = "WS50M"
 
 # Walk-forward sezon bazlı ayarlar
 ROLLING_KAC_SEZON_EGITIM = 2   # Rolling: son 2 kışla eğit, sonraki kışı test et
@@ -85,7 +83,7 @@ def main():
     for d in [dir_girdi, dir_sezon, dir_final, dir_roll, dir_exp, dir_log]:
         d.mkdir(parents=True, exist_ok=True)
 
-    # --- Girdiyi bul ---
+    # --- Girdiyi bul (SADECE kis_aylari_butun.csv) ---
     giris = giris_dosyasi_bul(root)
 
     # --- Girdiyi 00_Girdi içine kopyala ---
@@ -93,12 +91,12 @@ def main():
     try:
         shutil.copy2(giris, giris_kopya)
     except Exception:
-        # kopyalama izin vermezse, yine de devam edelim
         giris_kopya = Path(giris)
 
     # --- Oku ---
-    df = pd.read_csv(giris_kopya)
+    df = pd.read_csv(giris_kopya, encoding="utf-8-sig")
 
+    # --- Kolon kontrol ---
     if TARIH not in df.columns:
         raise ValueError(f"'{TARIH}' kolonu yok. Mevcut kolonlar: {list(df.columns)}")
     if HEDEF not in df.columns:
@@ -111,14 +109,14 @@ def main():
 
     # --- Duplicate timestamp kontrolü (varsa ortalama al) ---
     before_rows = len(df)
-    dup_count = df.duplicated(subset=[TARIH]).sum()
+    dup_count = int(df.duplicated(subset=[TARIH]).sum())
     if dup_count > 0:
         df = df.groupby(TARIH, as_index=False).mean(numeric_only=True)
 
     df = df.sort_values(TARIH).reset_index(drop=True)
     after_rows = len(df)
 
-    # --- Kış ayı kontrolü (emin olalım, değilse sadece 12/1/2 al) ---
+    # --- Emin olmak için 12/1/2 filtresi (2. script zaten kış verisi üretmiş olmalı) ---
     months_all = set(df[TARIH].dt.month.unique().tolist())
     if not months_all.issubset({12, 1, 2}):
         df = df[df[TARIH].dt.month.isin([12, 1, 2])].copy()
@@ -132,8 +130,7 @@ def main():
     sezonlar = sorted(df["KisSezonYili"].dropna().unique().astype(int).tolist())
 
     for s in sezonlar:
-        s_df = df[df["KisSezonYili"] == s].copy()
-        s_df = s_df.sort_values(TARIH).reset_index(drop=True)
+        s_df = df[df["KisSezonYili"] == s].copy().sort_values(TARIH).reset_index(drop=True)
 
         aylar = sorted(set(s_df[TARIH].dt.month.unique().tolist()))
         tam_sezon = set([12, 1, 2]).issubset(set(aylar))
@@ -165,10 +162,9 @@ def main():
     final_sezon = int(tamlar["KisSezonYili"].iloc[-1])
     final_test_path = tamlar["Dosya"].iloc[-1]
 
-    # eğitim sezonları = final hariç tam sezonlar
     egitim_tamlar = tamlar.iloc[:-1].copy()
-    egitim_df = pd.concat([pd.read_csv(p) for p in egitim_tamlar["Dosya"]], ignore_index=True)
-    test_df = pd.read_csv(final_test_path)
+    egitim_df = pd.concat([pd.read_csv(p, encoding="utf-8-sig") for p in egitim_tamlar["Dosya"]], ignore_index=True)
+    test_df = pd.read_csv(final_test_path, encoding="utf-8-sig")
 
     kaydet_csv(egitim_df, dir_final / "egitim_tam_sezonlar.csv")
     kaydet_csv(test_df, dir_final / f"final_test_Kis_{final_sezon}.csv")
@@ -184,8 +180,8 @@ def main():
         train_sezonlar = cv_sezonlar[i-ROLLING_KAC_SEZON_EGITIM:i]
         test_sezon = cv_sezonlar[i]
 
-        train_fold = pd.concat([pd.read_csv(sezon_dosya_map[s]) for s in train_sezonlar], ignore_index=True)
-        test_fold = pd.read_csv(sezon_dosya_map[test_sezon])
+        train_fold = pd.concat([pd.read_csv(sezon_dosya_map[s], encoding="utf-8-sig") for s in train_sezonlar], ignore_index=True)
+        test_fold = pd.read_csv(sezon_dosya_map[test_sezon], encoding="utf-8-sig")
 
         out_dir = dir_roll / f"Deneme_{deneme:02d}"
         kaydet_csv(train_fold, out_dir / "egitim.csv")
@@ -210,8 +206,8 @@ def main():
         train_sezonlar = cv_sezonlar[:i]
         test_sezon = cv_sezonlar[i]
 
-        train_fold = pd.concat([pd.read_csv(sezon_dosya_map[s]) for s in train_sezonlar], ignore_index=True)
-        test_fold = pd.read_csv(sezon_dosya_map[test_sezon])
+        train_fold = pd.concat([pd.read_csv(sezon_dosya_map[s], encoding="utf-8-sig") for s in train_sezonlar], ignore_index=True)
+        test_fold = pd.read_csv(sezon_dosya_map[test_sezon], encoding="utf-8-sig")
 
         out_dir = dir_exp / f"Deneme_{deneme:02d}"
         kaydet_csv(train_fold, out_dir / "egitim.csv")
@@ -229,56 +225,48 @@ def main():
 
     kaydet_csv(pd.DataFrame(expanding_list), dir_exp / "fold_listesi.csv")
 
-    # --- README’ler (ne nerededir) ---
+    # --- README’ler ---
     yaz_text(dir_girdi / "README.txt",
              "00_Girdi:\n"
-             "- Kullanılan girdi dosyasının kopyası burada durur.\n"
-             "- Orijinal dosyan bozulmaz.\n")
+             "- Kullanılan girdi dosyasının kopyası burada durur.\n")
 
     yaz_text(dir_sezon / "README.txt",
              "01_KisSezonlari:\n"
-             "- Kis_YYYY.csv dosyaları: kış sezonlarına ayrılmış veriler.\n"
-             "- KisSezon_Ozet.csv: her sezonun başlangıç/bitiş, satır sayısı ve tam sezon kontrolü.\n")
+             "- Kis_YYYY.csv: kış sezon verileri (Aralık -> +1 sezon yılı).\n"
+             "- KisSezon_Ozet.csv: sezon özet + tam sezon kontrol.\n")
 
     yaz_text(dir_final / "README.txt",
              "02_FinalTest:\n"
              "- egitim_tam_sezonlar.csv: final test hariç tüm TAM sezonların birleşimi.\n"
-             "- final_test_Kis_YYYY.csv: en son TAM sezon (asla eğitimde kullanılmaz).\n")
+             "- final_test_Kis_YYYY.csv: en son TAM sezon.\n")
 
     yaz_text(dir_roll / "README.txt",
              "03_CV_Rolling:\n"
-             "- Deneme_XX/egitim.csv ve test.csv: rolling walk-forward denemeleri.\n"
-             "- fold_listesi.csv: model scriptinin okuyacağı dosya listesi.\n")
+             "- Deneme_XX/egitim.csv + test.csv: rolling walk-forward.\n"
+             "- fold_listesi.csv: deneme listesi.\n")
 
     yaz_text(dir_exp / "README.txt",
              "04_CV_Expanding:\n"
-             "- Deneme_XX/egitim.csv ve test.csv: expanding walk-forward denemeleri.\n"
-             "- fold_listesi.csv: model scriptinin okuyacağı dosya listesi.\n")
+             "- Deneme_XX/egitim.csv + test.csv: expanding walk-forward.\n"
+             "- fold_listesi.csv: deneme listesi.\n")
 
     # --- LOG ---
     log_text = (
-        "VERI PARCALAMA LOG\n"
+        "VERI PARCALAMA LOG (SADECE YENI YAPI)\n"
         f"Girdi dosyasi: {giris}\n"
         f"Kopya (kullanilan): {giris_kopya}\n"
-        f"Duplicate DateTime sayisi: {int(dup_count)}\n"
+        f"Tarih kolonu: {TARIH}\n"
+        f"Hedef kolonu: {HEDEF}\n"
+        f"Duplicate DateTime sayisi: {dup_count}\n"
         f"Satir sayisi (once): {before_rows}\n"
         f"Satir sayisi (sonra): {after_rows}\n"
-        f"Uretilen sezon sayisi: {len(sezonlar)}\n"
-        f"TAM sezon sayisi: {len(tamlar)}\n"
-        f"Final test sezonu: Kis_{final_sezon}\n"
-        f"Rolling deneme sayisi: {len(rolling_list)}\n"
-        f"Expanding deneme sayisi: {len(expanding_list)}\n"
-        "\nKritik dosyalar:\n"
-        f"- Sezon ozet: {dir_sezon / 'KisSezon_Ozet.csv'}\n"
-        f"- Final test: {dir_final / f'final_test_Kis_{final_sezon}.csv'}\n"
     )
     yaz_text(dir_log / "LOG.txt", log_text)
 
-    print("✅ Her şey düzenli şekilde üretildi!")
+    print("✅ Her şey düzenli şekilde üretildi! (Sadece yeni yapı)")
     print(f"📁 Kök klasör: {root}")
     print(f"📌 Sezon özet: {dir_sezon / 'KisSezon_Ozet.csv'}")
     print(f"📌 Final test: {dir_final / f'final_test_Kis_{final_sezon}.csv'}")
-    print("🔎 Bir şey karışıksa: 99_LOG/LOG.txt bak.")
 
 if __name__ == "__main__":
     main()
