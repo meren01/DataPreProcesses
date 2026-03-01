@@ -1,0 +1,16 @@
+```gitignore
+# Output folders
+bitirme-2/
+**/hazir_veri/
+**/Deneme_**/
+**/01_KisSezonlari/
+**/02_FinalTest/
+**/03_CV_Rolling/
+**/04_CV_Expanding/
+**/99_LOG/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
