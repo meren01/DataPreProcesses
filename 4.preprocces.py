@@ -1,3 +1,4 @@
+# preprocces.py
 from pathlib import Path
 import json
 import numpy as np
@@ -5,56 +6,63 @@ import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
 # ============================================================
-# PREPROCESS (YENİ PIPELINE UYUMLU)
-# - 3. scriptin ürettiği fold'lardaki egitim.csv / test.csv okur
-# - DateTime_LST + WS50M ile çalışır (gerekirse otomatik de bulur)
-# - Saatliğe oturtur, kısa boşlukları interpolate eder
-# - Lag + rolling + hour_sin/cos feature üretir
+# PREPROCESS (PIPELINE UYUMLU, ROLLING + EXPANDING)
+# - 3. scriptin ürettiği fold'lardaki egitim/test csv'leri okur
+# - DateTime_LST + WS50M ile çalışır (yoksa otomatik adaylardan seçer)
+# - Saatliğe oturtur, kısa boşlukları interpolate eder (limitli)
+# - Lag + rolling + hour_sin/cos feature üretir (leakage'siz)
 # - Hedef: t+1
-# - MinMaxScaler'ı SADECE train'de fit eder (leakage yok)
+# - MinMaxScaler SADECE train’de fit (leakage yok)
+# - Çıktı: Deneme_XX/hazir_veri/...
 # ============================================================
 
 # =========================
 # AYARLAR
 # =========================
-# Tercih edilen kolon adları (dosyada yoksa otomatik adaylardan seçilir)
 PREFERRED_TIME_COL = "DateTime_LST"
 PREFERRED_TARGET_COL = "WS50M"
 
-FREQ = "H"       # saatlik (pandas için 'H' güvenli)
-HORIZON = 1      # t+1
+FREQ = "H"        # saatlik
+HORIZON = 1       # t+1
 
-# Feature set (klasik ML için güçlü + güvenli)
 LAGS = [1, 2, 3, 6, 12, 24, 48, 72, 168]
 ROLL_WINDOWS = [3, 6, 12, 24, 48, 168]
-ADD_TIME_CYCLES = True  # hour_sin, hour_cos
+ADD_TIME_CYCLES = True  # hour_sin/cos
 
-# Imputation
 INTERP_LIMIT_HOURS = 6
-FILL_LONG_GAPS_WITH = None  # None: uzun boşluklar NaN kalır -> sample drop (en güvenlisi)
+FILL_LONG_GAPS_WITH = None  # None: uzun boşluklar NaN kalır (en güvenlisi)
+
+# fold_listesi kolonları (senin 3. scriptin üretiyor)
+FOLD_TRAIN_COL = "EgitimDosyasi"
+FOLD_TEST_COL  = "TestDosyasi"
 
 
 # =========================
-# Yardımcılar
+# YARDIMCILAR
 # =========================
-def masaustu_bul() -> Path:
-    home = Path.home()
-    for c in [home / "Desktop", home / "Masaüstü", home / "Masaustu"]:
-        if c.exists() and c.is_dir():
-            return c
-    return home
+def find_project_root() -> Path:
+    """
+    En güvenlisi: scriptin olduğu klasörü proje kökü kabul et.
+    (Senin durumda: C:\\Users\\erenf\\bitirme-2)
+    """
+    return Path(__file__).resolve().parent
 
 
-def otomatik_fold_listesi_bul() -> Path:
-    base = masaustu_bul() / "bitirme-2"
+def find_fold_lists(project_root: Path) -> list[Path]:
+    """
+    Hem Rolling hem Expanding fold_listesi.csv bulur.
+    """
     candidates = [
-        base / "03_CV_Rolling" / "fold_listesi.csv",
-        base / "04_CV_Expanding" / "fold_listesi.csv",
+        project_root / "03_CV_Rolling" / "fold_listesi.csv",
+        project_root / "04_CV_Expanding" / "fold_listesi.csv",
     ]
-    for p in candidates:
-        if p.exists():
-            return p
-    raise FileNotFoundError("fold_listesi.csv bulunamadı. 03_CV_Rolling veya 04_CV_Expanding altında olmalı.")
+    found = [p for p in candidates if p.exists()]
+    if not found:
+        raise FileNotFoundError(
+            "fold_listesi.csv bulunamadı. Beklenen yollar:\n"
+            f"- {candidates[0]}\n- {candidates[1]}"
+        )
+    return found
 
 
 def pick_column(df: pd.DataFrame, preferred: str, candidates: list[str], purpose: str) -> str:
@@ -67,35 +75,44 @@ def pick_column(df: pd.DataFrame, preferred: str, candidates: list[str], purpose
 
 
 def ensure_datetime_sorted(df: pd.DataFrame, time_col: str, target_col: str) -> pd.DataFrame:
+    """
+    - time parse
+    - target numeric
+    - duplicate timestamp -> mean ile tekilleştir
+    - time'a göre sırala
+    """
     df = df.copy()
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
     df = df.dropna(subset=[time_col]).copy()
     df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
 
-    # Duplicate timestamp varsa ortalama ile tekilleştir
     dup = int(df.duplicated(subset=[time_col]).sum())
     if dup > 0:
         df = df.groupby(time_col, as_index=False).mean(numeric_only=True)
 
-    df = df.sort_values(time_col).reset_index(drop=True)
-    return df
+    return df.sort_values(time_col).reset_index(drop=True)
 
 
 def hourly_reindex(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
-    df = df.copy()
-    df = df.set_index(time_col)
+    """
+    Eksik saatleri satır olarak ekler (target NaN).
+    """
+    df = df.copy().set_index(time_col)
     full_idx = pd.date_range(df.index.min(), df.index.max(), freq=FREQ)
-    df = df.reindex(full_idx)  # eksik saatler satır olarak gelir
+    df = df.reindex(full_idx)
     df.index.name = time_col
     return df.reset_index()
 
 
 def limited_time_interpolate(df: pd.DataFrame, time_col: str, target_col: str) -> pd.DataFrame:
+    """
+    Sadece kısa boşlukları doldurur (limit=INTERP_LIMIT_HOURS).
+    Uzun boşluklar NaN kalır (None seçeneği en güvenlisi).
+    """
     df = df.copy()
     df[time_col] = pd.to_datetime(df[time_col])
     s = df.set_index(time_col)[target_col]
 
-    # Sadece kısa boşlukları doldur
     s2 = s.interpolate(
         method="time",
         limit=INTERP_LIMIT_HOURS,
@@ -108,7 +125,8 @@ def limited_time_interpolate(df: pd.DataFrame, time_col: str, target_col: str) -
         df[target_col] = df[target_col].ffill()
     elif isinstance(FILL_LONG_GAPS_WITH, (int, float)):
         df[target_col] = df[target_col].fillna(float(FILL_LONG_GAPS_WITH))
-    # None ise uzun boşluklar NaN kalır (en güvenlisi)
+    # None: uzun boşluklar NaN kalır
+
     return df
 
 
@@ -126,10 +144,10 @@ def add_time_features(df: pd.DataFrame, time_col: str) -> pd.DataFrame:
 
 def build_features(df: pd.DataFrame, time_col: str, target_col: str) -> pd.DataFrame:
     """
-    Leakage’siz feature üretimi:
-    - Lag: target.shift(k) -> sadece geçmiş
-    - Rolling: target.shift(1).rolling(w) -> t anı dahil değil
-    - Hedef: y = target(t+1) => shift(-1)
+    Leakage'siz:
+    - Lag: s.shift(k)
+    - Rolling: s.shift(1).rolling(...)
+    - Target: y = s.shift(-HORIZON)  (t+1)
     """
     df = df.copy()
     s = df[target_col]
@@ -147,15 +165,13 @@ def build_features(df: pd.DataFrame, time_col: str, target_col: str) -> pd.DataF
     return df
 
 
-def split_Xy(df_feat: pd.DataFrame, time_col: str, target_col: str):
+def split_Xy(df_feat: pd.DataFrame, time_col: str):
     """
-    Bu versiyonda feature listesi "sadece ürettiğimiz feature'lar" olacak şekilde kilitli:
+    Sadece engineered feature'ları alır:
     - lag_*
     - roll_mean_*, roll_std_*
     - hour_sin/hour_cos (veya hour)
-    Böylece NASA'nın YEAR/MO/DY/HR gibi kolonları yanlışlıkla feature'a girmez.
     """
-    df_feat = df_feat.copy()
     y_col = "y_t_plus_1"
 
     engineered = []
@@ -164,9 +180,9 @@ def split_Xy(df_feat: pd.DataFrame, time_col: str, target_col: str):
         engineered += [f"roll_mean_{w}", f"roll_std_{w}"]
     engineered += ["hour_sin", "hour_cos"] if ADD_TIME_CYCLES else ["hour"]
 
-    # Dosyada gerçekten var olanları al (güvenlik)
     feature_cols = [c for c in engineered if c in df_feat.columns]
 
+    # NaN drop: feature veya y NaN ise çıkar
     valid = df_feat[feature_cols + [y_col]].notna().all(axis=1)
     clean = df_feat.loc[valid, [time_col] + feature_cols + [y_col]].reset_index(drop=True)
 
@@ -177,17 +193,13 @@ def split_Xy(df_feat: pd.DataFrame, time_col: str, target_col: str):
 
 
 def scale_fit_train_transform_test(X_train: pd.DataFrame, X_test: pd.DataFrame):
-    # ✅ Leakage önleme: scaler sadece train’e fit
+    """
+    Leakage yok: scaler sadece train'e fit.
+    """
     scaler = MinMaxScaler()
-    X_train_scaled = pd.DataFrame(
-        scaler.fit_transform(X_train),
-        columns=X_train.columns
-    )
-    X_test_scaled = pd.DataFrame(
-        scaler.transform(X_test),
-        columns=X_test.columns
-    )
-    return X_train_scaled, X_test_scaled
+    X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns)
+    X_test_s  = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
+    return X_train_s, X_test_s
 
 
 def write_outputs(out_dir: Path, X_train, y_train, X_test, y_test, feature_cols, summary: dict):
@@ -204,110 +216,119 @@ def write_outputs(out_dir: Path, X_train, y_train, X_test, y_test, feature_cols,
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
 
+# =========================
+# MAIN
+# =========================
 def main():
-    fold_path = otomatik_fold_listesi_bul()
-    fold_df = pd.read_csv(fold_path, encoding="utf-8-sig")
+    project_root = find_project_root()
+    fold_paths = find_fold_lists(project_root)
 
-    # 3. scriptin ürettiği kolon isimleri (bizimkiler): EgitimDosyasi / TestDosyasi
-    train_col = "EgitimDosyasi" if "EgitimDosyasi" in fold_df.columns else None
-    test_col  = "TestDosyasi" if "TestDosyasi" in fold_df.columns else None
+    print(f"📌 Proje kökü: {project_root}")
+    print("📌 Bulunan fold listeleri:")
+    for p in fold_paths:
+        print("   -", p)
 
-    if train_col is None or test_col is None:
-        raise ValueError(
-            f"fold_listesi.csv içinde 'EgitimDosyasi' / 'TestDosyasi' yok.\nKolonlar: {list(fold_df.columns)}"
-        )
+    for fold_path in fold_paths:
+        fold_df = pd.read_csv(fold_path, encoding="utf-8-sig")
 
-    print(f"✅ fold_listesi: {fold_path}")
-    print(f"   Deneme sayısı: {len(fold_df)}")
+        if FOLD_TRAIN_COL not in fold_df.columns or FOLD_TEST_COL not in fold_df.columns:
+            raise ValueError(
+                f"{fold_path} içinde '{FOLD_TRAIN_COL}' / '{FOLD_TEST_COL}' yok.\n"
+                f"Kolonlar: {list(fold_df.columns)}"
+            )
 
-    for i, row in fold_df.iterrows():
-        train_path = Path(row[train_col])
-        test_path  = Path(row[test_col])
+        print(f"\n✅ İşleniyor: {fold_path}")
+        print(f"   Deneme sayısı: {len(fold_df)}")
 
-        deneme_dir = train_path.parent
-        out_dir = deneme_dir / "hazir_veri"
+        for i, row in fold_df.iterrows():
+            train_path = Path(row[FOLD_TRAIN_COL])
+            test_path  = Path(row[FOLD_TEST_COL])
 
-        # 1) Okuma
-        train_df0 = pd.read_csv(train_path, encoding="utf-8-sig")
-        test_df0  = pd.read_csv(test_path, encoding="utf-8-sig")
+            deneme_dir = train_path.parent
+            out_dir = deneme_dir / "hazir_veri"
 
-        # 2) Kolonları seç (otomatik + yeni yapıya öncelik)
-        time_col = pick_column(
-            train_df0,
-            preferred=PREFERRED_TIME_COL,
-            candidates=["DateTime_LST", "DateTime", "datetime", "timestamp"],
-            purpose="Tarih/Time"
-        )
-        target_col = pick_column(
-            train_df0,
-            preferred=PREFERRED_TARGET_COL,
-            candidates=["WS50M", "Speed", "ws50m", "speed"],
-            purpose="Hedef/Target"
-        )
+            # 1) Okuma
+            train_df0 = pd.read_csv(train_path, encoding="utf-8-sig")
+            test_df0  = pd.read_csv(test_path,  encoding="utf-8-sig")
 
-        # 3) Sırala + temizle (train/test ayrı)
-        train_raw = ensure_datetime_sorted(train_df0, time_col, target_col)
-        test_raw  = ensure_datetime_sorted(test_df0,  time_col, target_col)
+            # 2) Kolon seçimi
+            time_col = pick_column(
+                train_df0,
+                preferred=PREFERRED_TIME_COL,
+                candidates=["DateTime_LST", "DateTime", "datetime", "timestamp", "DateTime_LST"],
+                purpose="Tarih/Time"
+            )
+            target_col = pick_column(
+                train_df0,
+                preferred=PREFERRED_TARGET_COL,
+                candidates=["WS50M", "Speed", "ws50m", "speed"],
+                purpose="Hedef/Target"
+            )
 
-        # 4) Saatliğe oturt
-        train_hr = hourly_reindex(train_raw, time_col)
-        test_hr  = hourly_reindex(test_raw,  time_col)
+            # 3) Sırala + duplicate düzelt (train/test ayrı)
+            train_raw = ensure_datetime_sorted(train_df0, time_col, target_col)
+            test_raw  = ensure_datetime_sorted(test_df0,  time_col, target_col)
 
-        # 5) İmpute (train/test ayrı)
-        train_imp = limited_time_interpolate(train_hr, time_col, target_col)
-        test_imp  = limited_time_interpolate(test_hr,  time_col, target_col)
+            # 4) Saatliğe oturt
+            train_hr = hourly_reindex(train_raw, time_col)
+            test_hr  = hourly_reindex(test_raw,  time_col)
 
-        # 6) Feature üret
-        train_feat = build_features(train_imp, time_col, target_col)
-        test_feat  = build_features(test_imp,  time_col, target_col)
+            # 5) İmpute (train/test ayrı)
+            train_imp = limited_time_interpolate(train_hr, time_col, target_col)
+            test_imp  = limited_time_interpolate(test_hr,  time_col, target_col)
 
-        # 7) X/y ayır (NaN'lar düşer)
-        X_train, y_train, _, feat_cols = split_Xy(train_feat, time_col, target_col)
-        X_test,  y_test,  _, _        = split_Xy(test_feat,  time_col, target_col)
+            # 6) Feature üret
+            train_feat = build_features(train_imp, time_col, target_col)
+            test_feat  = build_features(test_imp,  time_col, target_col)
 
-        # 8) Normalize (fit sadece train)
-        X_train_s, X_test_s = scale_fit_train_transform_test(X_train, X_test)
+            # 7) X/y ayır
+            X_train, y_train, _, feat_cols = split_Xy(train_feat, time_col)
+            X_test,  y_test,  _, _        = split_Xy(test_feat,  time_col)
 
-        summary = {
-            "deneme_no": int(i + 1),
-            "train_csv": str(train_path),
-            "test_csv": str(test_path),
-            "time_col": time_col,
-            "target_col": target_col,
-            "tahmin_ufku": "t_plus_1",
-            "imputation": {
-                "method": "time_interpolate_limited",
-                "limit_hours": INTERP_LIMIT_HOURS,
-                "fill_long_gaps_with": FILL_LONG_GAPS_WITH
-            },
-            "features": {
-                "lags": LAGS,
-                "rolling_windows": ROLL_WINDOWS,
-                "time_cycles": ADD_TIME_CYCLES
-            },
-            "counts": {
-                "train_rows_raw": int(len(train_raw)),
-                "test_rows_raw": int(len(test_raw)),
-                "train_rows_hourly": int(len(train_hr)),
-                "test_rows_hourly": int(len(test_hr)),
-                "train_samples_final": int(len(X_train_s)),
-                "test_samples_final": int(len(X_test_s)),
-                "feature_count": int(len(feat_cols))
-            },
-            "ranges": {
-                "train": f"{train_raw[time_col].min()} -> {train_raw[time_col].max()}",
-                "test":  f"{test_raw[time_col].min()} -> {test_raw[time_col].max()}"
-            },
-            "leakage_guards": [
-                "train/test asla concat edilmedi",
-                "scaler fit sadece train",
-                "rolling hesaplarda shift(1) kullanıldı",
-                "test imputasyonu sadece test içi bilgiyle yapıldı"
-            ]
-        }
+            # 8) Normalize (fit only train)
+            X_train_s, X_test_s = scale_fit_train_transform_test(X_train, X_test)
 
-        write_outputs(out_dir, X_train_s, y_train, X_test_s, y_test, feat_cols, summary)
-        print(f"✔ Deneme {i+1}/{len(fold_df)} hazır -> {out_dir}")
+            summary = {
+                "deneme_no": int(i + 1),
+                "fold_listesi": str(fold_path),
+                "train_csv": str(train_path),
+                "test_csv": str(test_path),
+                "time_col": time_col,
+                "target_col": target_col,
+                "tahmin_ufku": "t_plus_1",
+                "imputation": {
+                    "method": "time_interpolate_limited",
+                    "limit_hours": INTERP_LIMIT_HOURS,
+                    "fill_long_gaps_with": FILL_LONG_GAPS_WITH
+                },
+                "features": {
+                    "lags": LAGS,
+                    "rolling_windows": ROLL_WINDOWS,
+                    "time_cycles": ADD_TIME_CYCLES
+                },
+                "counts": {
+                    "train_rows_raw": int(len(train_raw)),
+                    "test_rows_raw": int(len(test_raw)),
+                    "train_rows_hourly": int(len(train_hr)),
+                    "test_rows_hourly": int(len(test_hr)),
+                    "train_samples_final": int(len(X_train_s)),
+                    "test_samples_final": int(len(X_test_s)),
+                    "feature_count": int(len(feat_cols))
+                },
+                "ranges": {
+                    "train": f"{train_raw[time_col].min()} -> {train_raw[time_col].max()}",
+                    "test":  f"{test_raw[time_col].min()} -> {test_raw[time_col].max()}"
+                },
+                "leakage_guards": [
+                    "train/test asla concat edilmedi",
+                    "scaler fit sadece train",
+                    "rolling hesaplarda shift(1) kullanıldı",
+                    "test imputasyonu sadece test içi bilgiyle yapıldı"
+                ]
+            }
+
+            write_outputs(out_dir, X_train_s, y_train, X_test_s, y_test, feat_cols, summary)
+            print(f"✔ {fold_path.parent.name} | Deneme {i+1}/{len(fold_df)} hazır -> {out_dir}")
 
     print("\n✅ Bitti. Model scriptlerin şunları okuyacak:")
     print("   - hazir_veri/egitim_featurelari.csv")
