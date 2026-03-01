@@ -1,4 +1,4 @@
-### Tech Stack (Icons)
+### Tech Stack
 ![Tech Stack](https://skillicons.dev/icons?i=python,git,github,vscode)
 # DataPreProcesses (Bitirme-2) — Winter (DJF) Data Pipeline
 
